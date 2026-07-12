@@ -71,7 +71,6 @@ interface AuthRequest extends Request {
   user?: AuthPayload;
 }
 
-// ================= MongoDB =================
 
 const uri = process.env.MONGODB_URI!;
 const client = new MongoClient(uri);
@@ -102,7 +101,7 @@ async function connectDB() {
   }
 }
 
-// ================= Auth Helpers =================
+
 
 function signToken(payload: AuthPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
@@ -135,17 +134,12 @@ function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   }
 }
 
-// =======================
-// Routes
-// =======================
 
 app.get("/", (req: Request, res: Response) => {
   res.send("ReelBox Server Running 🚀");
 });
 
-// ---------- Auth Routes ----------
 
-// Register (manual)
 app.post("/auth/register", async (req: Request, res: Response) => {
   try {
     const { name, email, password } = req.body;
@@ -188,7 +182,6 @@ app.post("/auth/register", async (req: Request, res: Response) => {
   }
 });
 
-// Login (manual)
 app.post("/auth/login", async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
@@ -287,21 +280,18 @@ app.post("/auth/google", async (req: Request, res: Response) => {
   }
 });
 
-// Logout
+
 app.post("/auth/logout", (req: Request, res: Response) => {
   res.clearCookie(AUTH_COOKIE);
   res.json({ message: "Logged out" });
 });
 
-// Current user
+
 app.get("/auth/me", requireAuth, (req: AuthRequest, res: Response) => {
   res.json({ user: req.user });
 });
 
-// ---------- Movie Routes ----------
-// IMPORTANT: all specific "/movies/xxx" routes MUST come before "/movies/:id"
 
-// Get All Movies
 app.get("/movies", async (req: Request, res: Response) => {
   try {
     const movies = await moviesCollection.find().toArray();
@@ -314,7 +304,7 @@ app.get("/movies", async (req: Request, res: Response) => {
   }
 });
 
-// Trending Movies
+
 app.get("/movies/trending", async (req: Request, res: Response) => {
   try {
     const movies = await moviesCollection
@@ -328,7 +318,7 @@ app.get("/movies/trending", async (req: Request, res: Response) => {
   }
 });
 
-// Featured Movies
+
 app.get("/movies/featured", async (req: Request, res: Response) => {
   try {
     const movies = await moviesCollection
@@ -342,7 +332,7 @@ app.get("/movies/featured", async (req: Request, res: Response) => {
   }
 });
 
-// Popular Movies
+
 app.get("/movies/popular", async (req: Request, res: Response) => {
   try {
     const movies = await moviesCollection
@@ -357,7 +347,7 @@ app.get("/movies/popular", async (req: Request, res: Response) => {
   }
 });
 
-// My Movies (protected — Manage Items page)
+
 app.get("/movies/mine", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const movies = await moviesCollection
@@ -370,7 +360,7 @@ app.get("/movies/mine", requireAuth, async (req: AuthRequest, res: Response) => 
   }
 });
 
-// Filter options (genres/languages)
+
 app.get("/movies/filters", async (req: Request, res: Response) => {
   try {
     const genres = await moviesCollection.distinct("genre");
@@ -383,7 +373,7 @@ app.get("/movies/filters", async (req: Request, res: Response) => {
   }
 });
 
-// Explore — search + filter + sort + pagination
+
 app.get("/movies/explore", async (req: Request, res: Response) => {
   try {
     const {
@@ -455,12 +445,7 @@ app.get("/movies/explore", async (req: Request, res: Response) => {
   }
 });
 
-// ---------------------------------------------------------
-// Single Movie — PUBLIC, generic :id route.
-// Must stay LAST among all "/movies/*" GET routes.
-// requireAuth removed here per requirement #5: "Details Page
-// - Publicly accessible"
-// ---------------------------------------------------------
+
 app.get("/movies/:id", async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
@@ -482,7 +467,6 @@ app.get("/movies/:id", async (req: Request, res: Response) => {
   }
 });
 
-// Add Movie (protected)
 app.post("/movies", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const movie: Movie = {
@@ -498,7 +482,7 @@ app.post("/movies", requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// Delete Movie (protected — owner only)
+
 app.delete("/movies/:id", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
     const id = String(req.params.id);
