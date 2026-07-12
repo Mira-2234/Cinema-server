@@ -35,7 +35,6 @@ app.use(cookieParser());
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-// ================= Interfaces =================
 
 interface Movie {
   title: string;
