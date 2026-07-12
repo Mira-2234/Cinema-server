@@ -31,7 +31,7 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-// ================= Google OAuth Client =================
+
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
