@@ -19,7 +19,7 @@ if (!JWT_SECRET) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
-// ================= Middleware =================
+
 
 app.use(
   cors({
