@@ -19,11 +19,14 @@ if (!JWT_SECRET) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
-
+// ================= Middleware =================
 
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: [
+      "http://localhost:3000",
+      process.env.CLIENT_URL as string,
+    ],
     credentials: true,
   })
 );
@@ -31,10 +34,11 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-
+// ================= Google OAuth Client =================
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+// ================= Interfaces =================
 
 interface Movie {
   title: string;
@@ -70,6 +74,7 @@ interface AuthRequest extends Request {
   user?: AuthPayload;
 }
 
+// ================= MongoDB =================
 
 const uri = process.env.MONGODB_URI!;
 const client = new MongoClient(uri);
@@ -80,7 +85,6 @@ let usersCollection: Collection<User>;
 async function connectDB() {
   try {
     await client.connect();
-
     console.log("✅ MongoDB Connected");
 
     const db = client.db("ReelBox");
@@ -89,28 +93,26 @@ async function connectDB() {
     usersCollection = db.collection<User>("users");
 
     console.log("Database:", db.databaseName);
-    console.log(
-      "Collections:",
-      moviesCollection.collectionName,
-      usersCollection.collectionName
-    );
   } catch (error) {
     console.log(error);
     process.exit(1);
   }
 }
 
-
+// ================= Auth Helpers =================
 
 function signToken(payload: AuthPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
 }
 
+// ⭐ এইটাই মূল জায়গা যেখানে NODE_ENV কাজ করে ⭐
 function setAuthCookie(res: Response, token: string) {
+  const isProd = process.env.NODE_ENV === "production";
+
   res.cookie(AUTH_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
+    secure: isProd,              // production হলে true, localhost হলে false
+    sameSite: isProd ? "none" : "lax",  // production হলে "none", localhost হলে "lax"
     maxAge: 7 * 24 * 60 * 60 * 1000,
   });
 }
@@ -133,20 +135,22 @@ function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   }
 }
 
+// =======================
+// Routes
+// =======================
 
 app.get("/", (req: Request, res: Response) => {
   res.send("ReelBox Server Running 🚀");
 });
 
+// ---------- Auth Routes ----------
 
 app.post("/auth/register", async (req: Request, res: Response) => {
   try {
     const { name, email, password } = req.body;
 
     if (!name || !email || !password) {
-      return res
-        .status(400)
-        .json({ message: "Name, email and password are required" });
+      return res.status(400).json({ message: "Name, email and password are required" });
     }
 
     const existing = await usersCollection.findOne({ email });
@@ -164,17 +168,10 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       createdAt: new Date(),
     });
 
-    const token = signToken({
-      id: result.insertedId.toString(),
-      name,
-      email,
-    });
-
+    const token = signToken({ id: result.insertedId.toString(), name, email });
     setAuthCookie(res, token);
 
-    res.status(201).json({
-      user: { id: result.insertedId, name, email },
-    });
+    res.status(201).json({ user: { id: result.insertedId, name, email } });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Registration failed" });
@@ -186,9 +183,7 @@ app.post("/auth/login", async (req: Request, res: Response) => {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res
-        .status(400)
-        .json({ message: "Email and password are required" });
+      return res.status(400).json({ message: "Email and password are required" });
     }
 
     const user = await usersCollection.findOne({ email });
@@ -198,8 +193,7 @@ app.post("/auth/login", async (req: Request, res: Response) => {
 
     if (user.provider === "google" || !user.password) {
       return res.status(400).json({
-        message:
-          "This email is registered with Google. Please use 'Continue with Google'.",
+        message: "This email is registered with Google. Please use 'Continue with Google'.",
       });
     }
 
@@ -208,24 +202,16 @@ app.post("/auth/login", async (req: Request, res: Response) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    const token = signToken({
-      id: user._id.toString(),
-      name: user.name,
-      email: user.email,
-    });
-
+    const token = signToken({ id: user._id.toString(), name: user.name, email: user.email });
     setAuthCookie(res, token);
 
-    res.json({
-      user: { id: user._id, name: user.name, email: user.email },
-    });
+    res.json({ user: { id: user._id, name: user.name, email: user.email } });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Login failed" });
   }
 });
 
-// Google Login
 app.post("/auth/google", async (req: Request, res: Response) => {
   try {
     const { credential } = req.body;
@@ -262,34 +248,26 @@ app.post("/auth/google", async (req: Request, res: Response) => {
       return res.status(500).json({ message: "Failed to create user" });
     }
 
-    const token = signToken({
-      id: user._id.toString(),
-      name: user.name,
-      email: user.email,
-    });
-
+    const token = signToken({ id: user._id.toString(), name: user.name, email: user.email });
     setAuthCookie(res, token);
 
-    res.json({
-      user: { id: user._id, name: user.name, email: user.email },
-    });
+    res.json({ user: { id: user._id, name: user.name, email: user.email } });
   } catch (error) {
     console.error(error);
     res.status(401).json({ message: "Google authentication failed" });
   }
 });
 
-
 app.post("/auth/logout", (req: Request, res: Response) => {
   res.clearCookie(AUTH_COOKIE);
   res.json({ message: "Logged out" });
 });
 
-
 app.get("/auth/me", requireAuth, (req: AuthRequest, res: Response) => {
   res.json({ user: req.user });
 });
 
+// ---------- Movie Routes ----------
 
 app.get("/movies", async (req: Request, res: Response) => {
   try {
@@ -297,19 +275,13 @@ app.get("/movies", async (req: Request, res: Response) => {
     res.status(200).json(movies);
   } catch (error) {
     console.error(error);
-    res
-      .status(500)
-      .json({ success: false, message: "Failed to load movies" });
+    res.status(500).json({ success: false, message: "Failed to load movies" });
   }
 });
 
-
 app.get("/movies/trending", async (req: Request, res: Response) => {
   try {
-    const movies = await moviesCollection
-      .find({ trending: true })
-      .limit(8)
-      .toArray();
+    const movies = await moviesCollection.find({ trending: true }).limit(8).toArray();
     res.json(movies);
   } catch (error) {
     console.error(error);
@@ -317,13 +289,9 @@ app.get("/movies/trending", async (req: Request, res: Response) => {
   }
 });
 
-
 app.get("/movies/featured", async (req: Request, res: Response) => {
   try {
-    const movies = await moviesCollection
-      .find({ featured: true })
-      .limit(9)
-      .toArray();
+    const movies = await moviesCollection.find({ featured: true }).limit(9).toArray();
     res.json(movies);
   } catch (error) {
     console.error(error);
@@ -331,14 +299,9 @@ app.get("/movies/featured", async (req: Request, res: Response) => {
   }
 });
 
-
 app.get("/movies/popular", async (req: Request, res: Response) => {
   try {
-    const movies = await moviesCollection
-      .find()
-      .sort({ rating: -1 })
-      .limit(9)
-      .toArray();
+    const movies = await moviesCollection.find().sort({ rating: -1 }).limit(9).toArray();
     res.json(movies);
   } catch (error) {
     console.error(error);
@@ -346,12 +309,9 @@ app.get("/movies/popular", async (req: Request, res: Response) => {
   }
 });
 
-
 app.get("/movies/mine", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const movies = await moviesCollection
-      .find({ addedBy: req.user!.id })
-      .toArray();
+    const movies = await moviesCollection.find({ addedBy: req.user!.id }).toArray();
     res.json(movies);
   } catch (error) {
     console.error(error);
@@ -359,12 +319,10 @@ app.get("/movies/mine", requireAuth, async (req: AuthRequest, res: Response) => 
   }
 });
 
-
 app.get("/movies/filters", async (req: Request, res: Response) => {
   try {
     const genres = await moviesCollection.distinct("genre");
     const languages = await moviesCollection.distinct("language");
-
     res.json({ genres, languages });
   } catch (error) {
     console.error(error);
@@ -372,28 +330,18 @@ app.get("/movies/filters", async (req: Request, res: Response) => {
   }
 });
 
-
 app.get("/movies/explore", async (req: Request, res: Response) => {
   try {
-    const {
-      search,
-      genre,
-      language,
-      sort,
-      page = "1",
-      limit = "12",
-    } = req.query;
+    const { search, genre, language, sort, page = "1", limit = "12" } = req.query;
 
     const query: Record<string, unknown> = {};
 
     if (search && typeof search === "string") {
       query.title = { $regex: search, $options: "i" };
     }
-
     if (genre && typeof genre === "string") {
       query.genre = genre;
     }
-
     if (language && typeof language === "string") {
       query.language = language;
     }
@@ -404,33 +352,16 @@ app.get("/movies/explore", async (req: Request, res: Response) => {
 
     let sortOption: Record<string, 1 | -1> = {};
     switch (sort) {
-      case "rating_desc":
-        sortOption = { rating: -1 };
-        break;
-      case "rating_asc":
-        sortOption = { rating: 1 };
-        break;
-      case "year_desc":
-        sortOption = { releaseYear: -1 };
-        break;
-      case "year_asc":
-        sortOption = { releaseYear: 1 };
-        break;
-      case "title_asc":
-        sortOption = { title: 1 };
-        break;
-      default:
-        sortOption = { releaseYear: -1 };
+      case "rating_desc": sortOption = { rating: -1 }; break;
+      case "rating_asc": sortOption = { rating: 1 }; break;
+      case "year_desc": sortOption = { releaseYear: -1 }; break;
+      case "year_asc": sortOption = { releaseYear: 1 }; break;
+      case "title_asc": sortOption = { title: 1 }; break;
+      default: sortOption = { releaseYear: -1 };
     }
 
     const total = await moviesCollection.countDocuments(query);
-
-    const movies = await moviesCollection
-      .find(query)
-      .sort(sortOption)
-      .skip(skip)
-      .limit(limitNum)
-      .toArray();
+    const movies = await moviesCollection.find(query).sort(sortOption).skip(skip).limit(limitNum).toArray();
 
     res.json({
       movies,
@@ -443,7 +374,6 @@ app.get("/movies/explore", async (req: Request, res: Response) => {
     res.status(500).json({ message: "Failed to load movies" });
   }
 });
-
 
 app.get("/movies/:id", async (req: Request, res: Response) => {
   try {
@@ -468,11 +398,7 @@ app.get("/movies/:id", async (req: Request, res: Response) => {
 
 app.post("/movies", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const movie: Movie = {
-      ...req.body,
-      addedBy: req.user!.id,
-    };
-
+    const movie: Movie = { ...req.body, addedBy: req.user!.id };
     const result = await moviesCollection.insertOne(movie);
     res.json(result);
   } catch (error) {
@@ -480,7 +406,6 @@ app.post("/movies", requireAuth, async (req: AuthRequest, res: Response) => {
     res.status(500).json({ message: "Failed to add movie" });
   }
 });
-
 
 app.delete("/movies/:id", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
@@ -508,10 +433,12 @@ app.delete("/movies/:id", requireAuth, async (req: AuthRequest, res: Response) =
   }
 });
 
+// =======================
+// Start Server
+// =======================
 
 async function startServer() {
   await connectDB();
-
   app.listen(port, () => {
     console.log(`🚀 Server Running on ${port}`);
   });
