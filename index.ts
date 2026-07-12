@@ -4,6 +4,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import { OAuth2Client } from "google-auth-library";
 import { MongoClient, ObjectId, Collection } from "mongodb";
 
 dotenv.config();
@@ -13,6 +14,10 @@ const app = express();
 const port = Number(process.env.PORT) || 5000;
 const JWT_SECRET = process.env.JWT_SECRET as string;
 const AUTH_COOKIE = "cinema_auth_token";
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET is not defined in environment variables");
+}
 
 // ================= Middleware =================
 
@@ -26,10 +31,15 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
-// ================= Interface =================
+// ================= Google OAuth Client =================
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+// ================= Interfaces =================
 
 interface Movie {
   title: string;
+  shortDescription: string;
   poster: string;
   banner: string;
   genre: string;
@@ -40,12 +50,14 @@ interface Movie {
   description: string;
   featured: boolean;
   trending: boolean;
+  addedBy: string;
 }
 
 interface User {
   name: string;
   email: string;
-  password: string; // hashed
+  password?: string;
+  provider: "manual" | "google";
   createdAt: Date;
 }
 
@@ -79,7 +91,11 @@ async function connectDB() {
     usersCollection = db.collection<User>("users");
 
     console.log("Database:", db.databaseName);
-    console.log("Collections:", moviesCollection.collectionName, usersCollection.collectionName);
+    console.log(
+      "Collections:",
+      moviesCollection.collectionName,
+      usersCollection.collectionName
+    );
   } catch (error) {
     console.log(error);
     process.exit(1);
@@ -90,6 +106,15 @@ async function connectDB() {
 
 function signToken(payload: AuthPayload): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
+}
+
+function setAuthCookie(res: Response, token: string) {
+  res.cookie(AUTH_COOKIE, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+  });
 }
 
 function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
@@ -120,13 +145,15 @@ app.get("/", (req: Request, res: Response) => {
 
 // ---------- Auth Routes ----------
 
-// Register
+// Register (manual)
 app.post("/auth/register", async (req: Request, res: Response) => {
   try {
     const { name, email, password } = req.body;
 
     if (!name || !email || !password) {
-      return res.status(400).json({ message: "Name, email and password are required" });
+      return res
+        .status(400)
+        .json({ message: "Name, email and password are required" });
     }
 
     const existing = await usersCollection.findOne({ email });
@@ -140,6 +167,7 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       name,
       email,
       password: hashedPassword,
+      provider: "manual",
       createdAt: new Date(),
     });
 
@@ -149,12 +177,7 @@ app.post("/auth/register", async (req: Request, res: Response) => {
       email,
     });
 
-    res.cookie(AUTH_COOKIE, token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setAuthCookie(res, token);
 
     res.status(201).json({
       user: { id: result.insertedId, name, email },
@@ -165,18 +188,27 @@ app.post("/auth/register", async (req: Request, res: Response) => {
   }
 });
 
-// Login
+// Login (manual)
 app.post("/auth/login", async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ message: "Email and password are required" });
+      return res
+        .status(400)
+        .json({ message: "Email and password are required" });
     }
 
     const user = await usersCollection.findOne({ email });
     if (!user) {
       return res.status(401).json({ message: "Invalid email or password" });
+    }
+
+    if (user.provider === "google" || !user.password) {
+      return res.status(400).json({
+        message:
+          "This email is registered with Google. Please use 'Continue with Google'.",
+      });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
@@ -190,12 +222,7 @@ app.post("/auth/login", async (req: Request, res: Response) => {
       email: user.email,
     });
 
-    res.cookie(AUTH_COOKIE, token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    setAuthCookie(res, token);
 
     res.json({
       user: { id: user._id, name: user.name, email: user.email },
@@ -206,18 +233,73 @@ app.post("/auth/login", async (req: Request, res: Response) => {
   }
 });
 
+// Google Login
+app.post("/auth/google", async (req: Request, res: Response) => {
+  try {
+    const { credential } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ message: "Missing Google credential" });
+    }
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+
+    if (!payload || !payload.email) {
+      return res.status(401).json({ message: "Invalid Google token" });
+    }
+
+    let user = await usersCollection.findOne({ email: payload.email });
+
+    if (!user) {
+      const result = await usersCollection.insertOne({
+        name: payload.name || "Google User",
+        email: payload.email,
+        provider: "google",
+        createdAt: new Date(),
+      });
+
+      user = await usersCollection.findOne({ _id: result.insertedId });
+    }
+
+    if (!user) {
+      return res.status(500).json({ message: "Failed to create user" });
+    }
+
+    const token = signToken({
+      id: user._id.toString(),
+      name: user.name,
+      email: user.email,
+    });
+
+    setAuthCookie(res, token);
+
+    res.json({
+      user: { id: user._id, name: user.name, email: user.email },
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(401).json({ message: "Google authentication failed" });
+  }
+});
+
 // Logout
 app.post("/auth/logout", (req: Request, res: Response) => {
   res.clearCookie(AUTH_COOKIE);
   res.json({ message: "Logged out" });
 });
 
-// Current user (Next.js middleware/page ei diye check korte parbe)
+// Current user
 app.get("/auth/me", requireAuth, (req: AuthRequest, res: Response) => {
   res.json({ user: req.user });
 });
 
 // ---------- Movie Routes ----------
+// IMPORTANT: all specific "/movies/xxx" routes MUST come before "/movies/:id"
 
 // Get All Movies
 app.get("/movies", async (req: Request, res: Response) => {
@@ -226,14 +308,19 @@ app.get("/movies", async (req: Request, res: Response) => {
     res.status(200).json(movies);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ success: false, message: "Failed to load movies" });
+    res
+      .status(500)
+      .json({ success: false, message: "Failed to load movies" });
   }
 });
 
 // Trending Movies
 app.get("/movies/trending", async (req: Request, res: Response) => {
   try {
-    const movies = await moviesCollection.find({ trending: true }).limit(8).toArray();
+    const movies = await moviesCollection
+      .find({ trending: true })
+      .limit(8)
+      .toArray();
     res.json(movies);
   } catch (error) {
     console.error(error);
@@ -244,7 +331,10 @@ app.get("/movies/trending", async (req: Request, res: Response) => {
 // Featured Movies
 app.get("/movies/featured", async (req: Request, res: Response) => {
   try {
-    const movies = await moviesCollection.find({ featured: true }).limit(9).toArray();
+    const movies = await moviesCollection
+      .find({ featured: true })
+      .limit(9)
+      .toArray();
     res.json(movies);
   } catch (error) {
     console.error(error);
@@ -254,14 +344,131 @@ app.get("/movies/featured", async (req: Request, res: Response) => {
 
 // Popular Movies
 app.get("/movies/popular", async (req: Request, res: Response) => {
-  const movies = await moviesCollection.find().sort({ rating: -1 }).limit(9).toArray();
-  res.json(movies);
+  try {
+    const movies = await moviesCollection
+      .find()
+      .sort({ rating: -1 })
+      .limit(9)
+      .toArray();
+    res.json(movies);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to load popular movies" });
+  }
 });
 
-// Single Movie (protected — logged-in user chara dekhte parbe na)
-app.get("/movies/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+// My Movies (protected — Manage Items page)
+app.get("/movies/mine", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const movies = await moviesCollection
+      .find({ addedBy: req.user!.id })
+      .toArray();
+    res.json(movies);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to load your movies" });
+  }
+});
+
+// Filter options (genres/languages)
+app.get("/movies/filters", async (req: Request, res: Response) => {
+  try {
+    const genres = await moviesCollection.distinct("genre");
+    const languages = await moviesCollection.distinct("language");
+
+    res.json({ genres, languages });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to load filters" });
+  }
+});
+
+// Explore — search + filter + sort + pagination
+app.get("/movies/explore", async (req: Request, res: Response) => {
+  try {
+    const {
+      search,
+      genre,
+      language,
+      sort,
+      page = "1",
+      limit = "12",
+    } = req.query;
+
+    const query: Record<string, unknown> = {};
+
+    if (search && typeof search === "string") {
+      query.title = { $regex: search, $options: "i" };
+    }
+
+    if (genre && typeof genre === "string") {
+      query.genre = genre;
+    }
+
+    if (language && typeof language === "string") {
+      query.language = language;
+    }
+
+    const pageNum = Math.max(1, parseInt(String(page)) || 1);
+    const limitNum = Math.max(1, parseInt(String(limit)) || 12);
+    const skip = (pageNum - 1) * limitNum;
+
+    let sortOption: Record<string, 1 | -1> = {};
+    switch (sort) {
+      case "rating_desc":
+        sortOption = { rating: -1 };
+        break;
+      case "rating_asc":
+        sortOption = { rating: 1 };
+        break;
+      case "year_desc":
+        sortOption = { releaseYear: -1 };
+        break;
+      case "year_asc":
+        sortOption = { releaseYear: 1 };
+        break;
+      case "title_asc":
+        sortOption = { title: 1 };
+        break;
+      default:
+        sortOption = { releaseYear: -1 };
+    }
+
+    const total = await moviesCollection.countDocuments(query);
+
+    const movies = await moviesCollection
+      .find(query)
+      .sort(sortOption)
+      .skip(skip)
+      .limit(limitNum)
+      .toArray();
+
+    res.json({
+      movies,
+      total,
+      page: pageNum,
+      totalPages: Math.max(1, Math.ceil(total / limitNum)),
+    });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to load movies" });
+  }
+});
+
+// ---------------------------------------------------------
+// Single Movie — PUBLIC, generic :id route.
+// Must stay LAST among all "/movies/*" GET routes.
+// requireAuth removed here per requirement #5: "Details Page
+// - Publicly accessible"
+// ---------------------------------------------------------
+app.get("/movies/:id", async (req: Request, res: Response) => {
   try {
     const id = String(req.params.id);
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid movie id" });
+    }
+
     const movie = await moviesCollection.findOne({ _id: new ObjectId(id) });
 
     if (!movie) {
@@ -271,14 +478,18 @@ app.get("/movies/:id", requireAuth, async (req: AuthRequest, res: Response) => {
     res.json(movie);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Movie not found" });
+    res.status(500).json({ message: "Failed to load movie" });
   }
 });
 
-// Add Movie (protected — /items/add page-er jonno)
+// Add Movie (protected)
 app.post("/movies", requireAuth, async (req: AuthRequest, res: Response) => {
   try {
-    const movie: Movie = req.body;
+    const movie: Movie = {
+      ...req.body,
+      addedBy: req.user!.id,
+    };
+
     const result = await moviesCollection.insertOne(movie);
     res.json(result);
   } catch (error) {
@@ -287,9 +498,33 @@ app.post("/movies", requireAuth, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// =======================
-// Start Server
-// =======================
+// Delete Movie (protected — owner only)
+app.delete("/movies/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ message: "Invalid movie id" });
+    }
+
+    const movie = await moviesCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!movie) {
+      return res.status(404).json({ message: "Movie not found" });
+    }
+
+    if (movie.addedBy !== req.user!.id) {
+      return res.status(403).json({ message: "You can only delete your own items" });
+    }
+
+    await moviesCollection.deleteOne({ _id: new ObjectId(id) });
+    res.json({ message: "Movie deleted" });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Failed to delete movie" });
+  }
+});
+
 
 async function startServer() {
   await connectDB();
